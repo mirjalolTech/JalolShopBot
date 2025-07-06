@@ -6,16 +6,23 @@ import time
 import os
 import json
 
+# Railway uchun DATA_DIR va data_path funksiyasi
+DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+os.makedirs(DATA_DIR, exist_ok=True)
+def data_path(filename):
+    return os.path.join(DATA_DIR, filename)
+
+# Fayl yo‘llarini Railway uchun moslash
 def init_json_file(filename):
     if not os.path.exists(filename):
         with open(filename, "w", encoding="utf-8") as f:
             json.dump([], f, ensure_ascii=False, indent=4)
 
-init_json_file("feedback_comments.json")
+init_json_file(data_path("feedback_comments.json"))
 
 def yukla_mahsulotlar():
     try:
-        with open("products.json", "r", encoding="utf-8") as file:
+        with open(data_path("products.json"), "r", encoding="utf-8") as file:
             return json.load(file)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
@@ -38,14 +45,14 @@ def save_comment(message):
     }
 
     try:
-        with open("feedback_comments.json", "r", encoding="utf-8") as f:
+        with open(data_path("feedback_comments.json"), "r", encoding="utf-8") as f:
             all_comments = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         all_comments = []
 
     all_comments.append(izoh)
 
-    with open("feedback_comments.json", "w", encoding="utf-8") as f:
+    with open(data_path("feedback_comments.json"), "w", encoding="utf-8") as f:
         json.dump(all_comments, f, ensure_ascii=False, indent=4)
 
     bot.send_message(message.chat.id, "✅ Rahmat! Izohingiz qabul qilindi.")
@@ -73,7 +80,7 @@ narxlar = {
 
 def update_log_status(user_id, yangi_status):
     try:
-        with open("buyurtmalar_log.json", "r", encoding="utf-8") as file:
+        with open(data_path("buyurtmalar_log.json"), "r", encoding="utf-8") as file:
             logs = json.load(file)
     except (FileNotFoundError, json.JSONDecodeError):
         return
@@ -83,7 +90,7 @@ def update_log_status(user_id, yangi_status):
             log["status"] = yangi_status
             break
 
-    with open("buyurtmalar_log.json", "w", encoding="utf-8") as file:
+    with open(data_path("buyurtmalar_log.json"), "w", encoding="utf-8") as file:
         json.dump(logs, file, ensure_ascii=False, indent=4)
 
 def feedback_buttons():
@@ -96,105 +103,133 @@ def mahsulotlar_menusi():
     markup = types.InlineKeyboardMarkup(row_width=2)
     mahsulotlar = yukla_mahsulotlar().get("stars", {})
 
+    tugmalar = []
     for nom, narx in mahsulotlar.items():
         tugma = types.InlineKeyboardButton(f"{nom} – {narx}", callback_data=nom)
-        markup.add(tugma)
+        tugmalar.append(tugma)
 
+    markup.add(*tugmalar)
     return markup
+
 
 def premium_menu():
-    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup = types.InlineKeyboardMarkup(row_width=1)
     mahsulotlar = yukla_mahsulotlar().get("premium", {})
 
+    tugmalar = []
     for nom, narx in mahsulotlar.items():
         tugma = types.InlineKeyboardButton(f"{nom} – {narx}", callback_data=nom)
-        markup.add(tugma)
+        tugmalar.append(tugma)
 
+    markup.add(*tugmalar)
     return markup
 
+def is_banned(user_id, username):
+    import json
+    try:
+        with open(data_path("banned_users.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except:
+        return False
+
+    return user_id in data["user_ids"] or (username and username in data["usernames"])
+
+# Foydalanuvchi harakati logi va xatolik monitoringi
+import traceback
+
+def log_activity(user_id, action, info=None):
+    try:
+        # Avval eski loglarni o'qib olamiz
+        try:
+            with open(data_path("activity_log.json"), "r", encoding="utf-8") as f:
+                logs = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            logs = []
+        # Yangi log obyektini qo'shamiz
+        logs.append({
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "user_id": user_id,
+            "action": action,
+            "info": info or ""
+        })
+        with open(data_path("activity_log.json"), "w", encoding="utf-8") as f:
+            json.dump(logs, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        pass
+
+ADMIN_ID = 5092720090
+
+def notify_admin_on_error(func):
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            tb = traceback.format_exc()
+            user_id = args[0].from_user.id if args and hasattr(args[0], 'from_user') else 'Nomaʼlum'
+            bot.send_message(ADMIN_ID, f"❗️ Xatolik: {e}\nUser: {user_id}\n{tb}")
+            raise
+    return wrapper
+
+# Har bir asosiy komandaga log yozish (misol uchun start, referal, promo, buyurtma va h.k.)
+# start funksiyasiga misol:
 @bot.message_handler(commands=['start'])
-def send_welcome(message):
+@notify_admin_on_error
+def start(message):
+    user_id = str(message.from_user.id)
+    username = message.from_user.username or f"id{user_id}"
+    log_activity(user_id, 'start', message.text)
+
+    # 🚫 Ban qilingan foydalanuvchi
+    if is_banned(message.from_user.id, message.from_user.username):
+        return bot.send_message(message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
+
+    # REFERAL: referalni aniqlash
+    referrer_id = None
+    if len(message.text.split()) > 1:
+        referrer_id = message.text.split()[1]
+        if referrer_id == user_id:
+            referrer_id = None  # O'zini o'zi taklif qilolmaydi
+
+    # 👥 Foydalanuvchini ro‘yxatga olish
+    users_file = data_path("users.json")
+    users = {}
+    if os.path.exists(users_file):
+        try:
+            with open(users_file, "r", encoding="utf-8") as f:
+                users = json.load(f)
+        except json.JSONDecodeError:
+            users = {}
+    is_new = user_id not in users
+    if is_new:
+        users[user_id] = username
+        with open(users_file, "w", encoding="utf-8") as f:
+            json.dump(users, f, ensure_ascii=False, indent=4)
+
+    # REFERAL: yangi user bo'lsa va referrer_id bor bo'lsa, referalga qo'shish
+    if is_new and referrer_id and referrer_id in users:
+        referrals = load_referrals()
+        if referrer_id not in referrals:
+            referrals[referrer_id] = {"count": 0, "claimed": []}
+        referrals[referrer_id]["count"] += 1
+        save_referrals(referrals)
+
+    # 🧾 Menyu
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("🟡 Telegram Stars", "🔵 Telegram Premium")
     markup.add("ℹ️ Biz haqimizda", "🆘 Yordam")
-    
-    bot.send_message(message.chat.id,
+    # 👋 Xush kelibsiz xabari
+    bot.send_message(
+        message.chat.id,
         "👋 Assalomu alaykum, *JalolShop* botiga xush kelibsiz!\n\nXizmat turini tanlang 👇",
-        reply_markup=markup, parse_mode='Markdown')
-
-    try:
-            with open("users.json", "r", encoding="utf-8") as file:
-                users = json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError):
-                users = []
-
-    if message.from_user.id not in users:
-        users.append(message.from_user.id)
-    with open("users.json", "w", encoding="utf-8") as file:
-        json.dump(users, file, indent=4)
-@bot.message_handler(commands=['start'])
-def start(message):
-    user_id = message.from_user.id
-
-    if len(message.text.split()) > 1:
-        referer_id = message.text.split()[1] 
-
-        if referer_id != str(user_id): 
-            try:
-                with open("referrals.json", "r", encoding="utf-8") as file:
-                    referrals = json.load(file)
-            except (FileNotFoundError, json.JSONDecodeError):
-                referrals = {}
-
-            if referer_id not in referrals:
-                referrals[referer_id] = []
-
-            if user_id not in referrals[referer_id]:
-                referrals[referer_id].append(user_id)
-
-                with open("referrals.json", "w", encoding="utf-8") as file:
-                    json.dump(referrals, file, ensure_ascii=False, indent=4)
-
-                if len(referrals[referer_id]) == 10:
-                    bot.send_message(int(referer_id),
-                        "🎉 Tabriklaymiz! Siz 10 ta do‘stingizni taklif qildingiz!\n💫 Mukofot: 50 ta Stars")
-                    bot.send_message(5092720090,
-                        f"⭐️ 10 ta referal! @{message.from_user.username}ga mukofot yuboring!")
-
-                elif len(referrals[referer_id]) == 100:
-                    bot.send_message(int(referer_id),
-                        "🏆 Ajoyib! Siz 100 ta do‘stingizni taklif qildingiz!\n💎 Mukofot: 500 ta Stars")
-                    bot.send_message(5092720090,
-                        f"🏅 100 ta referal! @{message.from_user.username}ga SUPER mukofot yuboring!")
-
-    bot.send_message(message.chat.id, "👋 Xush kelibsiz JalolShop’ga!")
-
-@bot.message_handler(func=lambda m: m.text == "🟡 Telegram Stars")
-def stars_menu(message):
-    markup = mahsulotlar_menusi()
-    bot.send_message(message.chat.id, "💫 Mahsulotlardan birini tanlang:", reply_markup=markup)
- 
-@bot.message_handler(func=lambda m: m.text == "🔵 Telegram Premium")
-def show_premium_menu(message):
-    markup = premium_menu()
-    bot.send_message(message.chat.id, "💎 Telegram Premium paketlaridan birini tanlang:", reply_markup=markup)
-
-@bot.message_handler(func=lambda m: m.text == "ℹ️ Biz haqimizda")
-def about(message):
-    bot.send_message(message.chat.id,
-        "📦 *JalolShop* — avtomatik Telegram xizmatlari do‘koni.\n"
-        "🛍️ Stars, Premium va boshqa xizmatlar 24/7 sotuvda.", parse_mode='Markdown')
-
-@bot.message_handler(func=lambda m: m.text == "🆘 Yordam")
-def help_menu(message):
-    bot.send_message(message.chat.id,
-        "🆘 *Yordam kerakmi?* Quyidagilarga murojaat qiling:\n"
-        "👤 Admin: [@jaloI_admin](https://t.me/jaloI_admin)\n"
-        "📢 Kanal: [@JalolShopOfficial](https://t.me/JalolShopOfficial)\n"
-        "✉️ Email: Mirjalol.Tech@gmail.com", parse_mode='Markdown', disable_web_page_preview=True)
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+    print(f"Foydalanuvchi: {username} ({user_id}) start bosdi.")
 
 @bot.message_handler(commands=['adminpanel'])
 def admin_panel(message):
+    if is_banned(message.from_user.id, message.from_user.username):
+        return bot.send_message(message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     admin_id = 5092720090
     if message.from_user.id != admin_id:
         bot.send_message(message.chat.id, "⛔️ Siz admin emassiz.")
@@ -224,13 +259,15 @@ def admin_panel(message):
 
 @bot.message_handler(commands=['stats'])
 def stats(message):
+    if is_banned(message.from_user.id, message.from_user.username):
+        return bot.send_message(message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     admin_id = 5092720090
     if message.from_user.id != admin_id:
         bot.send_message(message.chat.id, "⛔️ Siz admin emassiz.")
         return
 
     try:
-        with open("buyurtmalar_log.json", "r", encoding="utf-8") as file:
+        with open(data_path("buyurtmalar_log.json"), "r", encoding="utf-8") as file:
             logs = json.load(file)
     except (FileNotFoundError, json.JSONDecodeError):
         logs = []
@@ -252,11 +289,13 @@ def stats(message):
 
 @bot.message_handler(commands=['feedbackstats'])
 def show_feedback_stats(message):
+    if is_banned(message.from_user.id, message.from_user.username):
+        return bot.send_message(message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     if message.from_user.id != 5092720090:
         return bot.send_message(message.chat.id, "⛔ Siz admin emassiz.")
 
     try:
-        with open("feedback_log.json", "r", encoding="utf-8") as f:
+        with open(data_path("feedback_log.json"), "r", encoding="utf-8") as f:
             feedbacklar = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return bot.send_message(message.chat.id, "❗️ Hali hech qanday fikr-mulohaza yo‘q.")
@@ -277,11 +316,13 @@ def show_feedback_stats(message):
 
 @bot.message_handler(commands=['topbuyers'])
 def show_top_buyers(message):
+    if is_banned(message.from_user.id, message.from_user.username):
+        return bot.send_message(message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     if message.from_user.id != 5092720090:
         return bot.send_message(message.chat.id, "⛔️ Siz admin emassiz.")
     
     try:
-        with open("buyurtmalar_log.json", "r", encoding="utf-8") as file:
+        with open(data_path("buyurtmalar_log.json"), "r", encoding="utf-8") as file:
             logs = json.load(file)
     except (FileNotFoundError, json.JSONDecodeError):
         return bot.send_message(message.chat.id, "❗️ Buyurtmalar log fayli topilmadi.")
@@ -306,49 +347,20 @@ def show_top_buyers(message):
 
     bot.send_message(message.chat.id, text, parse_mode="HTML")
 
-@bot.message_handler(commands=['refstats'])
-def ref_stats(message):
-    admin_id = 5092720090 
-    if message.from_user.id != admin_id:
-        return bot.send_message(message.chat.id, "⛔️ Siz admin emassiz.")
-
-    try:
-        with open("referrals.json", "r", encoding="utf-8") as f:
-            referrals = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return bot.send_message(message.chat.id, "❗️ Referal ma'lumotlari topilmadi.")
-
-    jami_foydalanuvchi = len(referrals)
-    jami_referal = sum(len(v) for v in referrals.values())
-
-    matn = (
-        f"📈 <b>Referal statistikasi</b>\n\n"
-        f"👤 Refererlar soni: <b>{jami_foydalanuvchi}</b>\n"
-        f"👥 Umumiy taklif qilinganlar: <b>{jami_referal}</b>"
-    )
-    bot.send_message(message.chat.id, matn, parse_mode="HTML")
-
-@bot.message_handler(commands=['referal'])
-def referal_link(message):
-    user_id = message.from_user.id
-    username = bot.get_me().username  
-
-    link = f"https://t.me/{username}?start={user_id}"
-    bot.send_message(message.chat.id,
-        f"🔗 Sizning taklif havolangiz:\n{link}\n\n"
-        "Ushbu havolani do‘stlaringizga yuboring va bonuslar yutib oling!")
 
 @bot.message_handler(commands=['profile'])
 def show_profile(message):
+    if is_banned(message.from_user.id, message.from_user.username):
+        return bot.send_message(message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     user_id = message.from_user.id
     try:
-        with open("buyurtmalar_log.json", "r", encoding="utf-8") as f:
+        with open(data_path("buyurtmalar_log.json"), "r", encoding="utf-8") as f:
             logs = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         logs = []
 
     try:
-        with open("feedback_log.json", "r", encoding="utf-8") as f:
+        with open(data_path("feedback_log.json"), "r", encoding="utf-8") as f:
             feedbacks = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         feedbacks = []
@@ -379,40 +391,17 @@ def show_profile(message):
     )
     bot.send_message(user_id, text, parse_mode='HTML')
 
-
-@bot.message_handler(commands=['bonuslarim'])
-def bonuslarim(message):
-    user_id = str(message.from_user.id)
-    
-    try:
-        with open("referrals.json", "r", encoding="utf-8") as f:
-            referrals = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        referrals = {}
-
-    taklif_soni = len(referrals.get(user_id, []))
-
-    mukofot_10 = "✅ Olingan" if taklif_soni >= 10 else "❌ Hali yo‘q"
-    mukofot_100 = "✅ Olingan" if taklif_soni >= 100 else "❌ Hali yo‘q"
-
-    matn = (
-        f"🎁 <b>Bonuslarim</b>\n\n"
-        f"👥 Taklif qilgan do‘stlar soni: <b>{taklif_soni} ta</b>\n\n"
-        f"🏅 10 ta do‘st uchun 50 Stars: {mukofot_10}\n"
-        f"🏆 100 ta do‘st uchun 500 Stars: {mukofot_100}"
-    )
-
-    bot.send_message(message.chat.id, matn, parse_mode="HTML")
-
 @bot.message_handler(commands=['izohlar'])
 def show_comments(message):
+    if is_banned(message.from_user.id, message.from_user.username):
+        return bot.send_message(message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     admin_id = 5092720090
 
     if message.from_user.id != admin_id:
         return bot.send_message(message.chat.id, "⛔️ Siz admin emassiz.")
 
     try:
-        with open("feedback_comments.json", "r", encoding="utf-8") as f:
+        with open(data_path("feedback_comments.json"), "r", encoding="utf-8") as f:
             izohlar = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return bot.send_message(admin_id, "❗️ Hech qanday izoh topilmadi.")
@@ -446,23 +435,25 @@ def log_buyurtma(user, nom, narx, rasm_id):
     }
 
     try:
-        with open("buyurtmalar_log.json", "r", encoding="utf-8") as file:
+        with open(data_path("buyurtmalar_log.json"), "r", encoding="utf-8") as file:
             logs = json.load(file)
     except (FileNotFoundError, json.JSONDecodeError):
         logs = []
 
     logs.append(log_entry)
 
-    with open("buyurtmalar_log.json", "w", encoding="utf-8") as file:
+    with open(data_path("buyurtmalar_log.json"), "w", encoding="utf-8") as file:
         json.dump(logs, file, ensure_ascii=False, indent=4)
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
+    if is_banned(message.from_user.id, message.from_user.username):
+        return bot.send_message(message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     user = message.from_user
     user_id = user.id
 
     try:
-        with open("cooldowns.json", "r", encoding="utf-8") as f:
+        with open(data_path("cooldowns.json"), "r", encoding="utf-8") as f:
             cooldowns = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         cooldowns = {}
@@ -485,7 +476,7 @@ def handle_photo(message):
         return
 
     if foydalanuvchi_buyurtmalari.get(user_id, {}).get("active") == True:
-        bot.reply_to(message, "⚠️ Siz allaqachon chek yuborgansiz. Iltimos, admin tasdiqlaguncha kuting.")
+        bot.reply_to(message, "⚠️ Siz allaqoncha chek yuborgansiz. Iltimos, admin tasdiqlaguncha kuting.")
         return
 
     if user_id not in foydalanuvchi_buyurtmalari:
@@ -537,7 +528,7 @@ def export_log(message):
     admin_id = 5092720090
 
     try:
-        with open("buyurtmalar_log.json", "r", encoding="utf-8") as file:
+        with open(data_path("buyurtmalar_log.json"), "r", encoding="utf-8") as file:
             logs = json.load(file)
     except (FileNotFoundError, json.JSONDecodeError):
         bot.send_message(admin_id, "❗️ Buyurtma loglari topilmadi yoki bo‘sh.")
@@ -579,7 +570,7 @@ import matplotlib.pyplot as plt
 
 def rasmli_statistika_yaratish():
     try:
-        with open("buyurtmalar_log.json", "r", encoding="utf-8") as file:
+        with open(data_path("buyurtmalar_log.json"), "r", encoding="utf-8") as file:
             logs = json.load(file)
     except:
         return None
@@ -600,14 +591,12 @@ def rasmli_statistika_yaratish():
     plt.savefig(image_path)
     plt.close()
     return image_path
-
-
-
-
-
-        
+ 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("tasdiq_") or call.data.startswith("bekor_"))
 def handle_admin_actions(call):
+    if is_banned(call.from_user.id, call.from_user.username):
+        return bot.send_message(call.message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
+
     user_id = int(call.data.split("_")[1])
     data = postlar.get(user_id)
 
@@ -644,14 +633,14 @@ def handle_admin_actions(call):
         bot.send_message(user_id, "🗣 Xizmatdan qoniqdingizmi?\n1 dan 5 gacha baholang:", reply_markup=feedback_markup)
 
         try:
-            with open("cooldowns.json", "r", encoding="utf-8") as f:
+            with open(data_path("cooldowns.json"), "r", encoding="utf-8") as f:
                 cooldowns = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             cooldowns = {}
 
-        cooldowns[str(user_id)] = time.time() + 120
+        cooldowns[str(user_id)] = time.time() + 120  # 2 daqiqa
 
-        with open("cooldowns.json", "w", encoding="utf-8") as f:
+        with open(data_path("cooldowns.json"), "w", encoding="utf-8") as f:
             json.dump(cooldowns, f, indent=4)
 
     elif call.data.startswith("bekor_"):
@@ -668,27 +657,53 @@ def handle_admin_actions(call):
             foydalanuvchi_buyurtmalari[user_id]["active"] = False
 
         try:
-            with open("cooldowns.json", "r", encoding="utf-8") as f:
+            with open(data_path("cooldowns.json"), "r", encoding="utf-8") as f:
                 cooldowns = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             cooldowns = {}
 
-        cooldowns[str(user_id)] = time.time() + 1800 
+        cooldowns[str(user_id)] = time.time() + 1800  # 30 daqiqa
 
-        with open("cooldowns.json", "w", encoding="utf-8") as f:
+        with open(data_path("cooldowns.json"), "w", encoding="utf-8") as f:
             json.dump(cooldowns, f, indent=4)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("add_"))
 def mahsulot_kiritish_bosqichi(call):
+    if is_banned(call.from_user.id, call.from_user.username):
+        return bot.send_message(call.message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
+
     if call.from_user.id != 5092720090:
         return
+
+    kategoriya = call.data.split("_")[1]
+
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"➕ Yangi mahsulotni {kategoriya} bo‘limiga kiriting:\n\nFormat: Nomi - Narxi",
+        parse_mode="Markdown"
+    )
+
+    bot.register_next_step_handler(msg, lambda m: saqlash_mahsulot(m, kategoriya))
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("add_"))
+def mahsulot_kiritish_bosqichi(call):
+    if is_banned(call.from_user.id, call.from_user.username):
+        return bot.send_message(call.message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
+
+    if call.from_user.id != 5092720090:
+        return
+
     kategoriya = call.data.split("_")[1]
     msg = bot.send_message(call.message.chat.id, f"➕ Yangi mahsulotni {kategoriya} bo‘limiga kiriting:\n\nFormat: Nomi - Narxi", parse_mode="Markdown")
     
     bot.register_next_step_handler(msg, lambda m: saqlash_mahsulot(m, kategoriya))
 
+
 @bot.callback_query_handler(func=lambda call: call.data == "admin_add_product")
 def admin_add_product(call):
+    if is_banned(call.from_user.id, call.from_user.username):
+        return bot.send_message(call.message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
+
     if call.from_user.id != 5092720090:
         return
 
@@ -701,6 +716,9 @@ def admin_add_product(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_delete_product")
 def mahsulot_ochirish(call):
+    if is_banned(call.from_user.id, call.from_user.username):
+        return bot.send_message(call.message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
+    
     if call.from_user.id != 5092720090:
         return
 
@@ -709,12 +727,24 @@ def mahsulot_ochirish(call):
 
     for kategoriya, items in mahsulotlar.items():
         for nom in items:
-            tugmalar.add(types.InlineKeyboardButton(f"{nom}", callback_data=f"delete_{kategoriya}_{nom}"))
+            tugmalar.add(
+                types.InlineKeyboardButton(
+                    text=f"{nom}", 
+                    callback_data=f"delete_{kategoriya}_{nom}"
+                )
+            )
 
-    bot.send_message(call.message.chat.id, "🗑 O‘chirish uchun mahsulotni tanlang:", reply_markup=tugmalar)
+    bot.send_message(
+        call.message.chat.id, 
+        "🗑 O‘chirish uchun mahsulotni tanlang:", 
+        reply_markup=tugmalar
+    )
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("delete_"))
 def mahsulot_ni_ochir(call):
+    if is_banned(call.from_user.id, call.from_user.username):
+        return bot.send_message(call.message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
+    
     if call.from_user.id != 5092720090:
         return
 
@@ -723,23 +753,29 @@ def mahsulot_ni_ochir(call):
 
     if kategoriya in mahsulotlar and nom in mahsulotlar[kategoriya]:
         del mahsulotlar[kategoriya][nom]
-        with open("products.json", "w", encoding="utf-8") as file:
+
+        with open(data_path("products.json"), "w", encoding="utf-8") as file:
             json.dump(mahsulotlar, file, ensure_ascii=False, indent=4)
+
         bot.answer_callback_query(call.id, f"✅ '{nom}' o‘chirildi.")
-        bot.edit_message_text("✅ Mahsulot muvaffaqiyatli o‘chirildi.", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text("✅ Mahsulot muvaffaqiyatli o‘chirildi.", chat_id=call.message.chat.id, message_id=call.message.message_id)
     else:
         bot.answer_callback_query(call.id, "❌ Mahsulot topilmadi.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_export_excel")
 def handle_export_excel(call):
+    if is_banned(call.from_user.id, call.from_user.username):
+        return bot.send_message(call.message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     export_log(call.message)
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_clean_logs")
 def handle_clean_logs(call):
+    if is_banned(call.from_user.id, call.from_user.username):
+        return bot.send_message(call.message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     admin_id = 5092720090
 
     try:
-        with open("buyurtmalar_log.json", "w", encoding="utf-8") as file:
+        with open(data_path("buyurtmalar_log.json"), "w", encoding="utf-8") as file:
             json.dump([], file, ensure_ascii=False, indent=4)
         bot.send_message(admin_id, "🧹 Eski buyurtma loglari tozalandi.")
     except Exception as e:
@@ -747,6 +783,8 @@ def handle_clean_logs(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_grafik")
 def send_graph(call):
+    if is_banned(call.from_user.id, call.from_user.username):
+        return bot.send_message(call.message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     if call.from_user.id != 5092720090:
         return
     image_path = rasmli_statistika_yaratish()
@@ -759,6 +797,8 @@ def send_graph(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "admin_broadcast")
 def start_broadcast(call):
+    if is_banned(call.from_user.id, call.from_user.username):
+        return bot.send_message(call.message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     if call.from_user.id != 5092720090:
         return
     msg = bot.send_message(call.message.chat.id, "📣 Reklama matnini yuboring:")
@@ -766,6 +806,8 @@ def start_broadcast(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("feedback_"))
 def handle_feedback(call):
+    if is_banned(call.from_user.id, call.from_user.username):
+        return bot.send_message(call.message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     user_id = call.from_user.id
     baho = int(call.data.split("_")[1])
 
@@ -780,14 +822,14 @@ def handle_feedback(call):
     }
 
     try:
-        with open("feedback_log.json", "r", encoding="utf-8") as f:
+        with open(data_path("feedback_log.json"), "r", encoding="utf-8") as f:
             feedbacklar = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         feedbacklar = []
 
     feedbacklar.append(feedback)
 
-    with open("feedback_log.json", "w", encoding="utf-8") as f:
+    with open(data_path("feedback_log.json"), "w", encoding="utf-8") as f:
         json.dump(feedbacklar, f, ensure_ascii=False, indent=4)
 
     admin_id = 5092720090
@@ -795,7 +837,7 @@ def handle_feedback(call):
 
 def process_broadcast(message):
     try:
-        with open("users.json", "r", encoding="utf-8") as file:
+        with open(data_path("users.json"), "r", encoding="utf-8") as file:
             users = json.load(file)
     except (FileNotFoundError, json.JSONDecodeError):
         bot.send_message(message.chat.id, "❗️ Hech qanday foydalanuvchi topilmadi.")
@@ -815,6 +857,8 @@ def process_broadcast(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_product_selection(call):
+    if is_banned(call.from_user.id, call.from_user.username):
+        return bot.send_message(call.message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     user_id = call.from_user.id
     mahsulotlar = yukla_mahsulotlar()
 
@@ -859,16 +903,19 @@ def saqlash_mahsulot(message, kategoriya):
 
     mahsulotlar[kategoriya][nom] = narx
 
-    with open("products.json", "w", encoding="utf-8") as file:
+    with open(data_path("products.json"), "w", encoding="utf-8") as file:
         json.dump(mahsulotlar, file, ensure_ascii=False, indent=4)
 
     bot.send_message(message.chat.id, f"✅ Mahsulot qo‘shildi:\n\n<b>{nom}</b> – <b>{narx}</b>", parse_mode='HTML')
 
+
 @bot.message_handler(commands=['status'])
 def check_status(message):
+    if is_banned(message.from_user.id, message.from_user.username):
+        return bot.send_message(message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     user_id = message.from_user.id
     try:
-        with open("buyurtmalar_log.json", "r", encoding="utf-8") as file:
+        with open(data_path("buyurtmalar_log.json"), "r", encoding="utf-8") as file:
             logs = json.load(file)
     except (FileNotFoundError, json.JSONDecodeError):
         logs = []
@@ -894,13 +941,15 @@ def check_status(message):
 
 @bot.message_handler(commands=['adminpanel'])
 def admin_panel(message):
+    if is_banned(message.from_user.id, message.from_user.username):
+        return bot.send_message(message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     admin_id = 5092720090
     if message.from_user.id != admin_id:
         bot.send_message(message.chat.id, "⛔ Siz admin emassiz.")
         return
 
     try:
-        with open("buyurtmalar_log.json", "r", encoding="utf-8") as file:
+        with open(data_path("buyurtmalar_log.json"), "r", encoding="utf-8") as file:
             logs = json.load(file)
     except (FileNotFoundError, json.JSONDecodeError):
         logs = []
@@ -932,6 +981,8 @@ def admin_panel(message):
 
 @bot.message_handler(commands=['izoh'])
 def handle_izoh_command(message):
+    if is_banned(message.from_user.id, message.from_user.username):
+        return bot.send_message(message.chat.id, "🚫 Siz admin tomonidan bloklangansiz.")
     msg = bot.send_message(message.chat.id, "📝 Iltimos, izohingizni yozing:")
     bot.register_next_step_handler(msg, save_user_comment)
 
@@ -943,22 +994,240 @@ def save_user_comment(message):
     izoh_matni = message.text
 
     try:
-        with open("feedback_comments.json", "r", encoding="utf-8") as f:
+        with open(data_path("feedback_comments.json"), "r", encoding="utf-8") as f:
             comments = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         comments = []
 
-    comments.append({
+    comment_obj = {
         "user_id": user.id,
         "username": user.username,
         "comment": izoh_matni,
         "vaqt": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    })
+    }
+    comments.append(comment_obj)
 
-    with open("feedback_comments.json", "w", encoding="utf-8") as f:
+    with open(data_path("feedback_comments.json"), "w", encoding="utf-8") as f:
         json.dump(comments, f, ensure_ascii=False, indent=4)
 
     bot.send_message(message.chat.id, "✅ Izohingiz uchun rahmat!")
 
+    # Admin ID ga izohni yuborish
+    admin_id = 5092720090
+    matn = (
+        f"📝 <b>Yangi izoh!</b>\n"
+        f"👤 <b>@{user.username or 'no_username'}</b>\n"
+        f"💬 {izoh_matni}\n"
+        f"🕒 {comment_obj['vaqt']}\n"
+    )
+    bot.send_message(admin_id, matn, parse_mode='HTML')
+
+@bot.message_handler(commands=['ban'])
+def ban_user(message):
+    if message.from_user.id != 5092720090:
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        return bot.send_message(message.chat.id, "⚠️ /ban 123456789 yoki /ban @username")
+
+    try:
+        with open(data_path("banned_users.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except:
+        data = {"user_ids": [], "usernames": []}
+
+    target = args[1]
+    if target.startswith("@"):
+        if target[1:] not in data["usernames"]:
+            data["usernames"].append(target[1:])
+    else:
+        uid = int(target)
+        if uid not in data["user_ids"]:
+            data["user_ids"].append(uid)
+
+    with open(data_path("banned_users.json"), "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+
+    bot.send_message(message.chat.id, "✅ Foydalanuvchi bloklandi.")
+
+
+@bot.message_handler(commands=['unban'])
+def unban_user(message):
+    if message.from_user.id != 5092720090:
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        return bot.send_message(message.chat.id, "⚠️ /unban 123456789 yoki /unban @username")
+
+    try:
+        with open(data_path("banned_users.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except:
+        return bot.send_message(message.chat.id, "⚠️ Ban fayli topilmadi.")
+
+    target = args[1]
+    if target.startswith("@"):
+        if target[1:] in data["usernames"]:
+            data["usernames"].remove(target[1:])
+    else:
+        uid = int(target)
+        if uid in data["user_ids"]:
+            data["user_ids"].remove(uid)
+
+    with open(data_path("banned_users.json"), "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+
+    bot.send_message(message.chat.id, "✅ Foydalanuvchi ban’dan chiqarildi.")
+
+@bot.message_handler(func=lambda message: message.text == "🟡 Telegram Stars")
+@notify_admin_on_error
+def show_stars(message):
+    mahsulotlar = yukla_mahsulotlar().get("stars", {})
+    if not mahsulotlar:
+        return bot.send_message(message.chat.id, "❗️ Hozircha Telegram Stars mahsulotlari mavjud emas.")
+    matn = "<b>🟡 Telegram Stars narxlari:</b>\n" "Buyurtma uchun mahsulotni tanlang va to‘lov screenshotini yuboring."
+    bot.send_message(message.chat.id, matn, parse_mode='HTML', reply_markup=mahsulotlar_menusi())
+
+@bot.message_handler(func=lambda message: message.text == "🔵 Telegram Premium")
+@notify_admin_on_error
+def show_premium(message):
+    mahsulotlar = yukla_mahsulotlar().get("premium", {})
+
+    if not mahsulotlar:
+        return bot.send_message(message.chat.id, "❗️ Hozircha Telegram Premium mahsulotlari mavjud emas.")
+
+    matn = "<b>🔵 Telegram Premium narxlari:</b>\n" "Buyurtma uchun mahsulotni tanlang va to‘lov screenshotini yuboring."
+    bot.send_message(message.chat.id, matn, parse_mode='HTML', reply_markup=premium_menu())
+
+@bot.message_handler(func=lambda message: message.text == "ℹ️ Biz haqimizda")
+@notify_admin_on_error
+def about_us(message):
+    matn = (
+        "ℹ️ <b>Biz haqimizda</b>\n\n"
+        "JalolShop — ishonchli va tezkor Telegram Stars va Premium xizmatlari do‘koni.\n"
+        "\nBarcha mahsulotlar rasmiy va kafolatlangan.\n"
+        "\nSavollar uchun: @jaloI_admin"
+    )
+    bot.send_message(message.chat.id, matn, parse_mode='HTML')
+
+@bot.message_handler(func=lambda message: message.text == "🆘 Yordam")
+@notify_admin_on_error
+def help_menu(message):
+    matn = (
+        "🆘 <b>Yordam</b>\n\n"
+        "1. Mahsulot tanlang va to‘lovni amalga oshiring.\n"
+        "2. To‘lov screenshotini yuboring.\n"
+        "3. Ko'p so'raladigan savollar /faq \n"
+        "4. Admin tasdiqlaganidan so‘ng mahsulotni olasiz.\n"
+        "\nSavollar uchun: @jaloI_admin \n"
+    )
+    bot.send_message(message.chat.id, matn, parse_mode='HTML')
+
+@bot.message_handler(commands=['faq'])
+@notify_admin_on_error
+def faq(message):
+    matn = (
+        "<b>Tez-tez so'raladigan savollar (FAQ)</b>\n\n"
+        "<b>1. Qanday to'lov qilish mumkin?</b>\n"
+        "- Mahsulotni tanlang, narxini ko'ring va to'lovni karta raqamiga amalga oshiring.\n"
+        "- To'lovdan so'ng screenshotni botga yuboring.\n\n"
+        "<b>2. To'lovdan keyin mahsulotni qachon olaman?</b>\n"
+        "- Admin to'lovni tekshiradi va mahsulotingizni tez orada yetkazib beradi.\n\n"
+        "<b>3. Qanday kartalarga to'lov qilinadi?</b>\n"
+        "- Uzcard va Humo kartalariga to'lov qabul qilinadi.\n\n"
+        "<b>4. Muammo yoki savol bo'lsa kimga murojaat qilaman?</b>\n"
+        "- @jaloI_admin ga yozing yoki '🆘 Yordam' tugmasidan foydalaning.\n\n"
+        "<b>5. Botdan qanday foydalanaman?</b>\n"
+        "- Quyidagi video yo'riqnoma orqali to'liq ko'rishingiz mumkin:\n"
+        "👉 <a href='https://t.me/JalolShopOfficial/117'>Botdan foydalanish videosi</a>\n\n"
+        "Boshqa savollar uchun admin bilan bog'laning!"
+    )
+    bot.send_message(message.chat.id, matn, parse_mode='HTML', disable_web_page_preview=True)
+
+# --- REFERAL SYSTEM START ---
+def load_referrals():
+    try:
+        with open(data_path("referrals.json"), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_referrals(data):
+    with open(data_path("referrals.json"), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+# --- REFERAL SYSTEM END ---
+
+@bot.message_handler(commands=['referal'])
+def referal_info(message):
+    user_id = str(message.from_user.id)
+    referrals = load_referrals()
+    count = referrals.get(user_id, {}).get("count", 0)
+    claimed = referrals.get(user_id, {}).get("claimed", [])
+    mahsulotlar = yukla_mahsulotlar().get("stars", {})
+    # Faqat raqamli nomlarni olamiz (50, 75, 100...)
+    available = [int(nom.split()[0]) for nom in mahsulotlar.keys() if nom.split()[0].isdigit()]
+    available.sort()
+    # Qancha miqdorlarni yechib olishi mumkin
+    withdrawable = [x for x in available if x <= count and x not in claimed]
+    # Referal havola
+    link = f"https://t.me/{bot.get_me().username}?start={user_id}"
+    matn = (
+        f"🔗 <b>Sizning referal havolangiz:</b>\n<code>{link}</code>\n\n"
+        f"👥 Taklif qilgan referallaringiz soni: <b>{count}</b>\n"
+        f"🎁 Sovg'a olish uchun quyidagilardan birini tanlang:\n"
+    )
+    markup = types.InlineKeyboardMarkup()
+    for x in withdrawable:
+        tugma = types.InlineKeyboardButton(f"{x} ta Stars (olish)", callback_data=f"referal_withdraw_{x}")
+        markup.add(tugma)
+    if not withdrawable:
+        matn += "<i>Hozircha sovg'a olish uchun yetarli referal yo'q yoki hammasi olingan.</i>"
+    bot.send_message(message.chat.id, matn, parse_mode='HTML', reply_markup=markup if withdrawable else None)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("referal_withdraw_"))
+def referal_withdraw(call):
+    user_id = str(call.from_user.id)
+    referrals = load_referrals()
+    count = referrals.get(user_id, {}).get("count", 0)
+    claimed = referrals.get(user_id, {}).get("claimed", [])
+    mahsulotlar = yukla_mahsulotlar().get("stars", {})
+    available = [int(nom.split()[0]) for nom in mahsulotlar.keys() if nom.split()[0].isdigit()]
+    available.sort()
+    x = int(call.data.split("_")[-1])
+    if x not in available or x > count or x in claimed:
+        bot.answer_callback_query(call.id, "❌ Bu miqdorni yechib bo'lmaydi!", show_alert=True)
+        return
+    # Sovg'a berish (admin xabar oladi)
+    referrals.setdefault(user_id, {"count": 0, "claimed": []})
+    referrals[user_id]["claimed"].append(x)
+    save_referrals(referrals)
+    # Foydalanuvchiga xabar
+    bot.send_message(user_id, f"🎉 Tabriklaymiz! Siz {x} ta Stars sovg'asini oldingiz! Admin tez orada sizga yetkazib beradi.")
+    # Admin xabari
+    admin_id = 5092720090
+    bot.send_message(admin_id, f"🎁 @{call.from_user.username or user_id} {x} ta Stars referal sovg'asini oldi!")
+    bot.answer_callback_query(call.id, "✅ So'rovingiz qabul qilindi!", show_alert=True)
+
+@bot.message_handler(commands=['referalstats'])
+def referal_stats(message):
+    if message.from_user.id != 5092720090:
+        return bot.send_message(message.chat.id, "⛔️ Siz admin emassiz.")
+    referrals = load_referrals()
+    users_file = data_path("users.json")
+    try:
+        with open(users_file, "r", encoding="utf-8") as f:
+            users = json.load(f)
+    except:
+        users = {}
+    # Top 5 userlar
+    top = sorted(referrals.items(), key=lambda x: x[1].get("count", 0), reverse=True)[:5]
+    if not top:
+        return bot.send_message(message.chat.id, "❗️ Hali hech kimda referal yo'q.")
+    text = "<b>🏆 TOP 5 referalchilar:</b>\n\n"
+    for i, (uid, info) in enumerate(top, 1):
+        username = users.get(uid, f"id{uid}")
+        text += f"{i}. @{username} — {info.get('count', 0)} ta referal\n"
+    bot.send_message(message.chat.id, text, parse_mode='HTML')
+    
 print("✅ Bot ishga tushdi")
 bot.polling(none_stop=True, timeout=20, long_polling_timeout=20)
